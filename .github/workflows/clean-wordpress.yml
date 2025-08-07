@@ -82,6 +82,22 @@ jobs:
         run: |
           echo "${{ steps.get_version.outputs.version }}" > VERSION.txt
 
+      - name: Create Versioned Folder and Zip
+        if: steps.check_existing.outputs.skip == 'false'
+        run: |
+          # Create version folder
+          mkdir -p "releases/wordpress-${{ steps.get_version.outputs.version }}"
+          
+          # Copy cleaned WordPress to version folder
+          cp -r cleaned/* "releases/wordpress-${{ steps.get_version.outputs.version }}/"
+          
+          # Create zip file
+          cd releases
+          zip -r "wordpress-clean-${{ steps.get_version.outputs.version }}.zip" "wordpress-${{ steps.get_version.outputs.version }}/"
+          cd ..
+          
+          echo "Created clean WordPress zip: releases/wordpress-clean-${{ steps.get_version.outputs.version }}.zip"
+
       - name: Commit and Push Changes
         if: steps.check_existing.outputs.skip == 'false'
         env:
