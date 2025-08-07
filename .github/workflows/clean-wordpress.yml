@@ -59,9 +59,16 @@ jobs:
         if: steps.check_existing.outputs.skip == 'false'
         run: |
           echo "Adding custom configuration to wp-config-sample.php"
-          # Create the custom configuration block
-          cat << 'EOF' > custom_config.tmp
-// Custom configuration added automatically
+          # Use a Python script to insert the configuration
+          cat << 'EOF' > insert_config.py
+          import re
+          
+          # Read the wp-config-sample.php file
+          with open('cleaned/wp-config-sample.php', 'r') as f:
+              content = f.read()
+          
+          # Define the custom configuration
+          custom_config = '''// Custom configuration added automatically
 define('AUTOMATIC_UPDATER_DISABLED', true);
 define('WP_AUTO_UPDATE_CORE', false);
 // Cron Disable
@@ -69,13 +76,19 @@ define('DISABLE_WP_CRON', true);
 // Limit the number of post revisions to 0
 define('WP_POST_REVISIONS', false);
 
-/* Add any custom values between this line and the "stop editing" line. */
-EOF
-          # Replace the original comment line with our custom config + the original comment
-          sed -i '/\/\* Add any custom values between this line and the "stop editing" line\. \*\//r custom_config.tmp' cleaned/wp-config-sample.php
-          sed -i '/\/\* Add any custom values between this line and the "stop editing" line\. \*\//d' cleaned/wp-config-sample.php
-          # Clean up temporary file
-          rm custom_config.tmp
+/* Add any custom values between this line and the "stop editing" line. */'''
+          
+          # Replace the comment line with our custom config
+          pattern = r'/\* Add any custom values between this line and the "stop editing" line\. \*/'
+          content = re.sub(pattern, custom_config, content)
+          
+          # Write back to file
+          with open('cleaned/wp-config-sample.php', 'w') as f:
+              f.write(content)
+          EOF
+          
+          python3 insert_config.py
+          rm insert_config.py
 
       - name: Save Cleaned Version Number
         if: steps.check_existing.outputs.skip == 'false'
