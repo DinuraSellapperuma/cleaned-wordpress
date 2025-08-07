@@ -59,23 +59,36 @@ jobs:
         if: steps.check_existing.outputs.skip == 'false'
         run: |
           echo "Adding custom configuration to wp-config-sample.php"
-          # Create a simple replacement using awk
-          awk '
-          /\/\* Add any custom values between this line and the "stop editing" line\. \*\// {
-            print "// Custom configuration added automatically"
-            print "define('\''AUTOMATIC_UPDATER_DISABLED'\'', true);"
-            print "define('\''WP_AUTO_UPDATE_CORE'\'', false);"
-            print "// Cron Disable"
-            print "define('\''DISABLE_WP_CRON'\'', true);"
-            print "// Limit the number of post revisions to 0"
-            print "define('\''WP_POST_REVISIONS'\'', false);"
-            print ""
-            print $0
-            next
-          }
-          { print }
-          ' cleaned/wp-config-sample.php > temp_config.php
-          mv temp_config.php cleaned/wp-config-sample.php
+          # Use a Python script to insert the configuration
+          cat << 'EOF' > insert_config.py
+          import re
+          
+          # Read the wp-config-sample.php file
+          with open('cleaned/wp-config-sample.php', 'r') as f:
+              content = f.read()
+          
+          # Define the custom configuration
+          custom_config = '''// Custom configuration added automatically
+define('AUTOMATIC_UPDATER_DISABLED', true);
+define('WP_AUTO_UPDATE_CORE', false);
+// Cron Disable
+define('DISABLE_WP_CRON', true);
+// Limit the number of post revisions to 0
+define('WP_POST_REVISIONS', false);
+
+/* Add any custom values between this line and the "stop editing" line. */'''
+          
+          # Replace the comment line with our custom config
+          pattern = r'/\* Add any custom values between this line and the "stop editing" line\. \*/'
+          content = re.sub(pattern, custom_config, content)
+          
+          # Write back to file
+          with open('cleaned/wp-config-sample.php', 'w') as f:
+              f.write(content)
+          EOF
+          
+          python3 insert_config.py
+          rm insert_config.py
 
       - name: Save Cleaned Version Number
         if: steps.check_existing.outputs.skip == 'false'
