@@ -52,14 +52,14 @@ jobs:
         run: |
           cat << 'EOF' >> cleaned/wp-config-sample.php
 
-// Custom configuration added automatically
+
 define('AUTOMATIC_UPDATER_DISABLED', true);
 define('WP_AUTO_UPDATE_CORE', false);
 
-// Cron Disable
+
 define('DISABLE_WP_CRON', true);
 
-// Limit the number of post revisions to 0
+
 define('WP_POST_REVISIONS', false);
 EOF
 
