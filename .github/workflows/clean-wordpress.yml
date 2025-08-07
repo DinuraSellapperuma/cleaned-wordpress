@@ -1,0 +1,91 @@
+name: Clean WordPress Latest
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  clean-wordpress:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get Latest WordPress Version
+        id: get_version
+        run: |
+          curl -s https://api.wordpress.org/core/version-check/1.7/ > version.json
+          LATEST=$(jq -r '.offers[0].current' version.json)
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest WordPress version: $LATEST"
+
+      - name: Check for Existing Version
+        id: check_existing
+        run: |
+          if [ -f "VERSION.txt" ] && grep -q "${{ steps.get_version.outputs.version }}" VERSION.txt; then
+            echo "Latest version already processed."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "New version found, proceeding with download and cleanup."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download WordPress
+        if: steps.check_existing.outputs.skip == 'false'
+        run: |
+          echo "Downloading WordPress ${{ steps.get_version.outputs.version }}"
+          curl -L -O https://wordpress.org/wordpress-${{ steps.get_version.outputs.version }}.zip
+          unzip -q wordpress-${{ steps.get_version.outputs.version }}.zip
+
+      - name: Clean WordPress
+        if: steps.check_existing.outputs.skip == 'false'
+        run: |
+          cd wordpress
+          echo "Removing unnecessary files..."
+          rm -f license.txt readme.html xmlrpc.php
+          rm -rf wp-content/themes/twenty*
+          rm -rf wp-content/plugins/akismet
+          rm -f wp-content/plugins/hello.php
+          cd ..
+          rm -rf cleaned
+          mv wordpress cleaned
+
+      - name: Modify wp-config-sample.php
+        if: steps.check_existing.outputs.skip == 'false'
+        run: |
+          echo "Adding custom configuration to wp-config-sample.php"
+          cat << 'EOF' >> cleaned/wp-config-sample.php
+
+          // Custom configuration added automatically
+          define('AUTOMATIC_UPDATER_DISABLED', true);
+          define('WP_AUTO_UPDATE_CORE', false);
+          // Cron Disable
+          define('DISABLE_WP_CRON', true);
+          // Limit the number of post revisions to 0
+          define('WP_POST_REVISIONS', false);
+          EOF
+
+      - name: Save Cleaned Version Number
+        if: steps.check_existing.outputs.skip == 'false'
+        run: |
+          echo "${{ steps.get_version.outputs.version }}" > VERSION.txt
+
+      - name: Commit and Push Changes
+        if: steps.check_existing.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Clean WordPress ${{ steps.get_version.outputs.version }}"
+            git push
+          fi
