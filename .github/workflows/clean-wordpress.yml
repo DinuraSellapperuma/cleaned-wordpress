@@ -1,20 +1,21 @@
 name: Clean WordPress Latest
+
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs every day at 12:00 AM UTC (fixed syntax)
-  workflow_dispatch: # Allows manual trigger
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   clean-wordpress:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Required for pushing changes
+      contents: write
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v4 # Updated to v4
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          
+
       - name: Get Latest WordPress Version
         id: get_version
         run: |
@@ -22,7 +23,7 @@ jobs:
           LATEST=$(jq -r '.offers[0].current' version.json)
           echo "version=$LATEST" >> $GITHUB_OUTPUT
           echo "Latest WordPress version: $LATEST"
-          
+
       - name: Check for Existing Version
         id: check_existing
         run: |
@@ -33,14 +34,14 @@ jobs:
             echo "New version found, proceeding with download and cleanup."
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
-          
+
       - name: Download WordPress
         if: steps.check_existing.outputs.skip == 'false'
         run: |
           echo "Downloading WordPress ${{ steps.get_version.outputs.version }}"
           curl -L -O https://wordpress.org/wordpress-${{ steps.get_version.outputs.version }}.zip
           unzip -q wordpress-${{ steps.get_version.outputs.version }}.zip
-          
+
       - name: Clean WordPress
         if: steps.check_existing.outputs.skip == 'false'
         run: |
@@ -53,27 +54,27 @@ jobs:
           cd ..
           rm -rf cleaned
           mv wordpress cleaned
-          
+
       - name: Modify wp-config-sample.php
         if: steps.check_existing.outputs.skip == 'false'
         run: |
           echo "Adding custom configuration to wp-config-sample.php"
           cat << 'EOF' >> cleaned/wp-config-sample.php
 
-// Custom configuration added automatically
-define('AUTOMATIC_UPDATER_DISABLED', true);
-define('WP_AUTO_UPDATE_CORE', false);
-// Cron Disable
-define('DISABLE_WP_CRON', true);
-// Limit the number of post revisions to 0
-define('WP_POST_REVISIONS', false);
-EOF
-          
+          // Custom configuration added automatically
+          define('AUTOMATIC_UPDATER_DISABLED', true);
+          define('WP_AUTO_UPDATE_CORE', false);
+          // Cron Disable
+          define('DISABLE_WP_CRON', true);
+          // Limit the number of post revisions to 0
+          define('WP_POST_REVISIONS', false);
+          EOF
+
       - name: Save Cleaned Version Number
         if: steps.check_existing.outputs.skip == 'false'
         run: |
           echo "${{ steps.get_version.outputs.version }}" > VERSION.txt
-          
+
       - name: Commit and Push Changes
         if: steps.check_existing.outputs.skip == 'false'
         env:
