@@ -1,4 +1,4 @@
-name: WordPress Selective Releases with Bricks Hash
+name: WordPress Selective Releases with Safe Bricks Key & Custom wp-config
 
 on:
   schedule:
@@ -18,49 +18,46 @@ jobs:
 
       - run: sudo apt-get update && sudo apt-get install -y jq zip unzip curl
 
-      # --- Step 1: Get All Versions ---
+      # --- Step 1: Get All Versions (safe for secrets) ---
       - id: get
         env:
           BRICKS_LICENSE_KEY: ${{ secrets.BRICKS_LICENSE_KEY }}
         run: |
           set -euo pipefail
+          echo "::add-mask::$BRICKS_LICENSE_KEY"
 
-          # WordPress
+          # WordPress core version
           WP_VERSION=$(curl -s https://api.wordpress.org/core/version-check/1.7/ | jq -r '.offers[0].current')
 
           # Bricks header-hash detection
           BRICKS_AVAILABLE=false
           BRICKS_HASH="unavailable"
           if [ -n "${BRICKS_LICENSE_KEY:-}" ]; then
-            echo "🔍 Checking Bricks Builder availability..."
             if BRICKS_HEADERS=$(curl -s -I "https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"); then
               CONTENT_LENGTH=$(echo "$BRICKS_HEADERS" | grep -i content-length | awk '{print $2}' | tr -d '\r\n' || echo "unknown")
               LAST_MODIFIED=$(echo "$BRICKS_HEADERS" | grep -i last-modified | cut -d' ' -f2- | tr -d '\r\n' || echo "unknown")
               BRICKS_HASH=$(echo "${CONTENT_LENGTH}-${LAST_MODIFIED}" | sha256sum | awk '{print $1}')
               BRICKS_AVAILABLE=true
-              echo "📦 Bricks hash: $BRICKS_HASH"
-            else
-              echo "⚠️ Could not contact Bricks API"
             fi
           fi
 
-          # Core Framework
+          # Core Framework plugin
           CORE_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/core-framework.json" | jq -r '.version // "latest"')
 
-          # Hello Elementor
+          # Hello Elementor theme
           HELLO_VERSION=$(curl -s "https://api.wordpress.org/themes/info/1.0/hello-elementor.json" | jq -r '.version // "latest"')
 
-          # Elementor
+          # Elementor plugin
           ELEMENTOR_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/elementor.json" | jq -r '.version // "latest"')
 
-          # Dixy Child
+          # Dixy Child theme
           if DIXY_API=$(curl -s "https://api.github.com/repos/DinuraSellapperuma/dixy-child/commits/main") && echo "$DIXY_API" | jq . >/dev/null 2>&1; then
             DIXY_VERSION=$(echo "$DIXY_API" | jq -r '.sha' | cut -c1-8)
           else
             DIXY_VERSION=$(date +%Y%m%d)
           fi
 
-          # Build safe JSON for tracking
+          # Build safe JSON
           jq -n \
             --arg wp "$WP_VERSION" \
             --arg bricks "$BRICKS_HASH" \
@@ -94,7 +91,7 @@ jobs:
           echo "elementor=$(changed elementor)" >> $GITHUB_OUTPUT
           echo "dixy=$(changed dixy_child)" >> $GITHUB_OUTPUT
 
-      # --- Step 3: Download WordPress if Core Changed ---
+      # --- Step 3: Download and Clean WordPress ---
       - if: steps.diff.outputs.wp == 'true'
         run: |
           WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
@@ -108,7 +105,32 @@ jobs:
           cd ..
           rm -rf cleaned && mv wordpress cleaned
 
-      # --- Step 4: Prepare Release Directories ---
+      # --- Step 4: Modify wp-config-sample.php ---
+      - if: steps.diff.outputs.wp == 'true'
+        run: |
+          echo "Adding custom configuration to wp-config-sample.php"
+          awk '
+          /\/\* Add any custom values between this line and the "stop editing" line\. \*\// {
+            print "// Custom configuration added automatically"
+            print "define('\''AUTOMATIC_UPDATER_DISABLED'\'', true);"
+            print "define('\''WP_AUTO_UPDATE_CORE'\'', false);"
+            print "// Disable WP Cron"
+            print "define('\''DISABLE_WP_CRON'\'', true);"
+            print "// Limit the number of post revisions to 0"
+            print "define('\''WP_POST_REVISIONS'\'', false);"
+            print "// Increase PHP memory limit"
+            print "define('\''WP_MEMORY_LIMIT'\'', '256M');"
+            print "// Debug mode off by default"
+            print "define('\''WP_DEBUG'\'', false);"
+            print ""
+            print $0
+            next
+          }
+          { print }
+          ' cleaned/wp-config-sample.php > temp_config.php
+          mv temp_config.php cleaned/wp-config-sample.php
+
+      # --- Step 5: Prepare Release Directories ---
       - run: |
           WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
           mkdir -p releases
@@ -121,11 +143,14 @@ jobs:
             cp -r cleaned releases/wordpress-elementor-$WP_VERSION
           fi
 
-      # --- Step 5: Update Bricks Package ---
+      # --- Step 6: Update Bricks Package ---
       - if: steps.diff.outputs.wp == 'true' || steps.diff.outputs.bricks == 'true' || steps.diff.outputs.core == 'true' || steps.diff.outputs.dixy == 'true'
         env:
           BRICKS_LICENSE_KEY: ${{ secrets.BRICKS_LICENSE_KEY }}
         run: |
+          set -euo pipefail
+          echo "::add-mask::$BRICKS_LICENSE_KEY"
+
           WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
           cd releases/wordpress-bricks-$WP_VERSION
 
@@ -140,7 +165,7 @@ jobs:
           if [ "$(jq -r '.bricks_available' /tmp/current.json)" = "true" ]; then
             rm -rf wp-content/themes/bricks
             BRICKS_URL="https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"
-            curl -L -o /tmp/bricks.zip "$BRICKS_URL" || curl -L -o /tmp/bricks.zip "$BRICKS_URL&version=2.0.1"
+            curl -f -L -o /tmp/bricks.zip "$BRICKS_URL" || curl -f -L -o /tmp/bricks.zip "$BRICKS_URL&version=2.0.1"
             unzip -o -q /tmp/bricks.zip -d wp-content/themes/
             rm -f /tmp/bricks.zip
           fi
@@ -156,7 +181,7 @@ jobs:
           unzip -o -q /tmp/core.zip -d wp-content/plugins/
           rm -f /tmp/core.zip
 
-      # --- Step 6: Update Elementor Package ---
+      # --- Step 7: Update Elementor Package ---
       - if: steps.diff.outputs.wp == 'true' || steps.diff.outputs.hello == 'true' || steps.diff.outputs.elementor == 'true'
         run: |
           WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
@@ -184,7 +209,7 @@ jobs:
           unzip -o -q /tmp/elementor.zip -d wp-content/plugins/
           rm -f /tmp/elementor.zip
 
-      # --- Step 7: Create Zip Files ---
+      # --- Step 8: Create Zip Files ---
       - run: |
           WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
           cd releases
@@ -193,7 +218,7 @@ jobs:
           ([ "${{ steps.diff.outputs.wp }}" = "true" ] || [ "${{ steps.diff.outputs.hello }}" = "true" ] || [ "${{ steps.diff.outputs.elementor }}" = "true" ]) && zip -r "wordpress-elementor-$WP_VERSION.zip" "wordpress-elementor-$WP_VERSION" >/dev/null
           cd ..
 
-      # --- Step 8: Save versions.json & Commit ---
+      # --- Step 9: Save versions.json & Commit ---
       - run: cp /tmp/current.json versions.json
 
       - env:
