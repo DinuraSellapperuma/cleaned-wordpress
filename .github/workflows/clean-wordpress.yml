@@ -2,7 +2,7 @@ name: Clean WordPress Latest
 
 on:
   schedule:
-     - cron: '0 */5 * * *'
+    - cron: '0 */5 * * *'
   workflow_dispatch:
 
 jobs:
@@ -16,35 +16,26 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get Latest WordPress Version
-        id: get_version
-        run: |
-          curl -s https://api.wordpress.org/core/version-check/1.7/ > version.json
-          LATEST=$(jq -r '.offers[0].current' version.json)
-          echo "version=$LATEST" >> $GITHUB_OUTPUT
-          echo "WordPress version: $LATEST"
-
-      - name: Get Latest Bricks Builder Version
-        id: get_bricks_version
+      - name: Get All Component Versions
+        id: get_all_versions
         env:
           BRICKS_LICENSE_KEY: ${{ secrets.BRICKS_LICENSE_KEY }}
         run: |
+          echo "=== Checking WordPress Version ==="
+          curl -s https://api.wordpress.org/core/version-check/1.7/ > version.json
+          WP_VERSION=$(jq -r '.offers[0].current' version.json)
+          echo "wordpress_version=$WP_VERSION" >> $GITHUB_OUTPUT
+          echo "WordPress version: $WP_VERSION"
+          
+          echo "=== Checking Bricks Builder Version ==="
           if [ -n "$BRICKS_LICENSE_KEY" ]; then
-            echo "Checking Bricks Builder availability..."
-            # Since Bricks doesn't provide a version API, we'll use a hash-based approach
-            # Download just the headers to check if there's a new version available
             if BRICKS_HEADERS=$(curl -s -I "https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY" 2>/dev/null); then
-              # Extract content-length or last-modified as version indicator
               CONTENT_LENGTH=$(echo "$BRICKS_HEADERS" | grep -i content-length | awk '{print $2}' | tr -d '\r\n' || echo "unknown")
               LAST_MODIFIED=$(echo "$BRICKS_HEADERS" | grep -i last-modified | cut -d' ' -f2- | tr -d '\r\n' || echo "unknown")
-              
-              # Create a SHA-256 hash from both values to detect changes
               BRICKS_HASH=$(echo "${CONTENT_LENGTH}-${LAST_MODIFIED}" | sha256sum | cut -d' ' -f1)
-              
               echo "bricks_version=$BRICKS_HASH" >> $GITHUB_OUTPUT
               echo "bricks_available=true" >> $GITHUB_OUTPUT
               echo "Bricks Builder SHA-256: $BRICKS_HASH"
-              echo "Content-Length: $CONTENT_LENGTH, Last-Modified: $LAST_MODIFIED"
             else
               echo "bricks_available=false" >> $GITHUB_OUTPUT
               echo "Bricks Builder API not accessible"
@@ -53,44 +44,47 @@ jobs:
             echo "bricks_available=false" >> $GITHUB_OUTPUT
             echo "No Bricks license key provided"
           fi
-
-      - name: Get Latest Elementor and Core Framework Versions  
-        id: get_elementor_version
-        run: |
-          echo "Checking Hello Elementor theme version..."
           
-          # Get Hello Elementor theme version
+          echo "=== Checking Hello Elementor Theme ==="
           if HELLO_API=$(curl -s "https://api.wordpress.org/themes/info/1.0/hello-elementor.json" 2>/dev/null) && echo "$HELLO_API" | jq . >/dev/null 2>&1; then
             HELLO_VERSION=$(echo "$HELLO_API" | jq -r '.version')
             echo "hello_elementor_version=$HELLO_VERSION" >> $GITHUB_OUTPUT
-            echo "Hello Elementor theme version: $HELLO_VERSION"
+            echo "Hello Elementor theme: $HELLO_VERSION"
           else
             echo "hello_elementor_version=latest" >> $GITHUB_OUTPUT
             echo "Hello Elementor: API failed, using latest"
           fi
           
-          echo "Checking Elementor plugin version..."
-          
-          # Get Elementor plugin version  
+          echo "=== Checking Elementor Plugin ==="
           if ELEMENTOR_API=$(curl -s "https://api.wordpress.org/plugins/info/1.0/elementor.json" 2>/dev/null) && echo "$ELEMENTOR_API" | jq . >/dev/null 2>&1; then
             ELEMENTOR_VERSION=$(echo "$ELEMENTOR_API" | jq -r '.version')
             echo "elementor_plugin_version=$ELEMENTOR_VERSION" >> $GITHUB_OUTPUT
-            echo "Elementor plugin version: $ELEMENTOR_VERSION"
+            echo "Elementor plugin: $ELEMENTOR_VERSION"
           else
             echo "elementor_plugin_version=latest" >> $GITHUB_OUTPUT  
             echo "Elementor plugin: API failed, using latest"
           fi
           
-          echo "Checking Core Framework plugin version..."
-          
-          # Get Core Framework plugin version
+          echo "=== Checking Core Framework Plugin ==="
           if CORE_API=$(curl -s "https://api.wordpress.org/plugins/info/1.0/core-framework.json" 2>/dev/null) && echo "$CORE_API" | jq . >/dev/null 2>&1; then
             CORE_VERSION=$(echo "$CORE_API" | jq -r '.version')
             echo "core_framework_version=$CORE_VERSION" >> $GITHUB_OUTPUT
-            echo "Core Framework plugin version: $CORE_VERSION"
+            echo "Core Framework plugin: $CORE_VERSION"
           else
             echo "core_framework_version=latest" >> $GITHUB_OUTPUT  
             echo "Core Framework plugin: API failed, using latest"
+          fi
+          
+          echo "=== Checking Dixy Child Theme ==="
+          # Check GitHub repository for latest commit hash as version
+          if DIXY_API=$(curl -s "https://api.github.com/repos/DinuraSellapperuma/dixy-child/commits/main" 2>/dev/null) && echo "$DIXY_API" | jq . >/dev/null 2>&1; then
+            DIXY_VERSION=$(echo "$DIXY_API" | jq -r '.sha' | cut -c1-8)
+            echo "dixy_child_version=$DIXY_VERSION" >> $GITHUB_OUTPUT
+            echo "Dixy Child Theme: $DIXY_VERSION"
+          else
+            DIXY_VERSION=$(date +%Y%m%d)
+            echo "dixy_child_version=$DIXY_VERSION" >> $GITHUB_OUTPUT  
+            echo "Dixy Child Theme: API failed, using date $DIXY_VERSION"
           fi
 
       - name: Check for Existing Versions
@@ -143,7 +137,7 @@ jobs:
           # Create a simple replacement using awk
           awk '
           /\/\* Add any custom values between this line and the "stop editing" line\. \*\// {
-            print "// Custom configuration By D I X Y : https://dinurasellapperuma.com"
+            print "// Custom configuration added automatically"
             print "define('\''AUTOMATIC_UPDATER_DISABLED'\'', true);"
             print "define('\''WP_AUTO_UPDATE_CORE'\'', false);"
             print "// Cron Disable"
