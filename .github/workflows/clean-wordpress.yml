@@ -30,13 +30,14 @@ jobs:
 
           # Bricks
           BRICKS_AVAILABLE=false
-          BRICKS_HASH=""
+          BRICKS_HASH="unavailable"
           if [ -n "${BRICKS_LICENSE_KEY:-}" ]; then
-            HEADERS=$(curl -s -I "https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY")
-            LEN=$(echo "$HEADERS" | awk 'tolower($0) ~ /^content-length:/ {print $2}' | tr -d '\r\n')
-            MOD=$(echo "$HEADERS" | awk 'tolower($0) ~ /^last-modified:/ {$1=""; sub(/^ /,""); print; exit}' | tr -d '\r\n')
-            BRICKS_HASH=$(echo "${LEN:-u}-${MOD:-u}" | sha256sum | awk '{print $1}')
-            BRICKS_AVAILABLE=true
+            if BRICKS_HEADERS=$(curl -s -I "https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"); then
+              LEN=$(echo "$BRICKS_HEADERS" | awk 'tolower($0) ~ /^content-length:/ {print $2}' | tr -d '\r\n' || echo "0")
+              MOD=$(echo "$BRICKS_HEADERS" | awk 'tolower($0) ~ /^last-modified:/ {$1=""; sub(/^ /,""); print; exit}' | tr -d '\r\n' || echo "unknown")
+              BRICKS_HASH=$(echo "${LEN}-${MOD}" | sha256sum | awk '{print $1}')
+              BRICKS_AVAILABLE=true
+            fi
           fi
 
           # Core Framework
@@ -49,12 +50,13 @@ jobs:
           ELEMENTOR_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/elementor.json" | jq -r '.version // "latest"')
 
           # Dixy Child
-          if DIXY_API=$(curl -s "https://api.github.com/repos/DinuraSellapperuma/dixy-child/commits/main"); then
+          if DIXY_API=$(curl -s "https://api.github.com/repos/DinuraSellapperuma/dixy-child/commits/main") && echo "$DIXY_API" | jq . >/dev/null 2>&1; then
             DIXY_VERSION=$(echo "$DIXY_API" | jq -r '.sha' | cut -c1-8)
           else
             DIXY_VERSION=$(date +%Y%m%d)
           fi
 
+          # Build safe JSON
           jq -n \
             --arg wp "$WP_VERSION" \
             --arg bricks "$BRICKS_HASH" \
