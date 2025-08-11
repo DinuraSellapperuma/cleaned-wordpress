@@ -1,4 +1,4 @@
-name: Clean WordPress Latest (Selective Update)
+name: WordPress Selective Releases
 
 on:
   schedule:
@@ -6,59 +6,50 @@ on:
   workflow_dispatch:
 
 jobs:
-  selective-update:
+  build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Ensure tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq zip unzip curl
+      - run: sudo apt-get update && sudo apt-get install -y jq zip unzip curl
 
-      # ---- Discover current upstream versions ----
-      - name: Get All Component Versions
-        id: get
+      # --- Get All Versions ---
+      - id: get
         env:
           BRICKS_LICENSE_KEY: ${{ secrets.BRICKS_LICENSE_KEY }}
         run: |
           set -euo pipefail
 
           # WordPress
-          curl -s https://api.wordpress.org/core/version-check/1.7/ > /tmp/wpver.json
-          WP_VERSION=$(jq -r '.offers[0].current' /tmp/wpver.json)
+          WP_VERSION=$(curl -s https://api.wordpress.org/core/version-check/1.7/ | jq -r '.offers[0].current')
 
-          # Bricks (hash from HEAD so we don't leak version; still detects change)
+          # Bricks
           BRICKS_AVAILABLE=false
           BRICKS_HASH=""
           if [ -n "${BRICKS_LICENSE_KEY:-}" ]; then
-            if BRICKS_HEADERS=$(curl -s -I "https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"); then
-              LEN=$(echo "$BRICKS_HEADERS" | awk 'tolower($0) ~ /^content-length:/ {print $2}' | tr -d '\r\n' || true)
-              MOD=$(echo "$BRICKS_HEADERS" | awk 'tolower($0) ~ /^last-modified:/ {$1=""; sub(/^ /,""); print; exit}' | tr -d '\r\n' || true)
-              BRICKS_HASH=$(echo "${LEN:-u}-${MOD:-u}" | sha256sum | awk '{print $1}')
-              BRICKS_AVAILABLE=true
-            fi
+            HEADERS=$(curl -s -I "https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY")
+            LEN=$(echo "$HEADERS" | awk 'tolower($0) ~ /^content-length:/ {print $2}' | tr -d '\r\n')
+            MOD=$(echo "$HEADERS" | awk 'tolower($0) ~ /^last-modified:/ {$1=""; sub(/^ /,""); print; exit}' | tr -d '\r\n')
+            BRICKS_HASH=$(echo "${LEN:-u}-${MOD:-u}" | sha256sum | awk '{print $1}')
+            BRICKS_AVAILABLE=true
           fi
 
-          # Core Framework (plugin)
-          CORE_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/core-framework.json" | jq -r '.version // empty')
-          CORE_VERSION=${CORE_VERSION:-latest}
+          # Core Framework
+          CORE_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/core-framework.json" | jq -r '.version // "latest"')
 
-          # Hello theme
-          HELLO_VERSION=$(curl -s "https://api.wordpress.org/themes/info/1.0/hello-elementor.json" | jq -r '.version // empty')
-          HELLO_VERSION=${HELLO_VERSION:-latest}
+          # Hello Elementor
+          HELLO_VERSION=$(curl -s "https://api.wordpress.org/themes/info/1.0/hello-elementor.json" | jq -r '.version // "latest"')
 
-          # Elementor plugin
-          ELEMENTOR_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/elementor.json" | jq -r '.version // empty')
-          ELEMENTOR_VERSION=${ELEMENTOR_VERSION:-latest}
+          # Elementor
+          ELEMENTOR_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/elementor.json" | jq -r '.version // "latest"')
 
-          # Dixy child theme (short SHA; or date fallback)
-          if DIXY_API=$(curl -s "https://api.github.com/repos/DinuraSellapperuma/dixy-child/commits/main") && echo "$DIXY_API" | jq . >/dev/null 2>&1; then
+          # Dixy Child
+          if DIXY_API=$(curl -s "https://api.github.com/repos/DinuraSellapperuma/dixy-child/commits/main"); then
             DIXY_VERSION=$(echo "$DIXY_API" | jq -r '.sha' | cut -c1-8)
           else
             DIXY_VERSION=$(date +%Y%m%d)
@@ -72,237 +63,142 @@ jobs:
             --arg hello "$HELLO_VERSION" \
             --arg elementor "$ELEMENTOR_VERSION" \
             --arg dixy "$DIXY_VERSION" \
-            '{wordpress:$wp, bricks:$bricks, bricks_available:$bricks_available,
-              core_framework:$core, hello_elementor:$hello, elementor:$elementor, dixy_child:$dixy}' \
-            > /tmp/current_versions.json
+            '{wordpress:$wp, bricks:$bricks, bricks_available:$bricks_available, core_framework:$core, hello_elementor:$hello, elementor:$elementor, dixy_child:$dixy}' \
+            > /tmp/current.json
 
-          echo "current_versions=$(cat /tmp/current_versions.json | jq -c .)" >> $GITHUB_OUTPUT
+          {
+            echo 'versions<<JSON'
+            cat /tmp/current.json
+            echo 'JSON'
+          } >> "$GITHUB_OUTPUT"
 
-      # ---- Decide what changed (vs versions.json in repo) ----
-      - name: Compute Change Set
-        id: diff
+      # --- Compare to previous versions ---
+      - id: diff
         run: |
           set -euo pipefail
           echo '{}' > /tmp/prev.json
-          if [ -f versions.json ]; then cp versions.json /tmp/prev.json; fi
-          echo '${{ steps.get.outputs.current_versions }}' > /tmp/curr.json
+          [ -f versions.json ] && cp versions.json /tmp/prev.json
 
-          changed_wp=$(jq -r '(.wordpress != (input|.wordpress))' /tmp/curr.json /tmp/prev.json)
-          changed_bricks=$(jq -r '(.bricks != (input|.bricks))' /tmp/curr.json /tmp/prev.json)
-          changed_core=$(jq -r '(.core_framework != (input|.core_framework))' /tmp/curr.json /tmp/prev.json)
-          changed_hello=$(jq -r '(.hello_elementor != (input|.hello_elementor))' /tmp/curr.json /tmp/prev.json)
-          changed_elementor=$(jq -r '(.elementor != (input|.elementor))' /tmp/curr.json /tmp/prev.json)
-          changed_dixy=$(jq -r '(.dixy_child != (input|.dixy_child))' /tmp/curr.json /tmp/prev.json)
+          changed() { jq -r "(.${1} != (input|.${1}))" /tmp/current.json /tmp/prev.json; }
 
-          # Any change to WP means rebuild all three bases (clean, bricks, elementor)
-          echo "update_clean=$changed_wp" >> $GITHUB_OUTPUT
+          echo "wp=$(changed wordpress)" >> $GITHUB_OUTPUT
+          echo "bricks=$(changed bricks)" >> $GITHUB_OUTPUT
+          echo "core=$(changed core_framework)" >> $GITHUB_OUTPUT
+          echo "hello=$(changed hello_elementor)" >> $GITHUB_OUTPUT
+          echo "elementor=$(changed elementor)" >> $GITHUB_OUTPUT
+          echo "dixy=$(changed dixy_child)" >> $GITHUB_OUTPUT
 
-          # Bricks package updates if WP/base OR (bricks/core/dixy changed)
-          if [ "$changed_wp" = "true" ] || [ "$changed_bricks" = "true" ] || [ "$changed_core" = "true" ] || [ "$changed_dixy" = "true" ]; then
-            echo "update_bricks=true" >> $GITHUB_OUTPUT
-          else
-            echo "update_bricks=false" >> $GITHUB_OUTPUT
-          fi
-
-          # Elementor package updates if WP/base OR (hello/elementor changed)
-          if [ "$changed_wp" = "true" ] || [ "$changed_hello" = "true" ] || [ "$changed_elementor" = "true" ]; then
-            echo "update_elementor=true" >> $GITHUB_OUTPUT
-          else
-            echo "update_elementor=false" >> $GITHUB_OUTPUT
-          fi
-
-          # Useful booleans for selective folder updates when base unchanged:
-          echo "changed_bricks=$changed_bricks" >> $GITHUB_OUTPUT
-          echo "changed_core=$changed_core" >> $GITHUB_OUTPUT
-          echo "changed_hello=$changed_hello" >> $GITHUB_OUTPUT
-          echo "changed_elementor=$changed_elementor" >> $GITHUB_OUTPUT
-          echo "changed_dixy=$changed_dixy" >> $GITHUB_OUTPUT
-
-      # ---- Download & prepare "cleaned" base if WP changed or missing ----
-      - name: Prepare Clean Base (if needed)
-        if: steps.diff.outputs.update_clean == 'true' || !startsWith(github.ref, 'refs/')
+      # --- Download and prepare clean base if WP changed ---
+      - if: steps.diff.outputs.wp == 'true'
         run: |
-          set -euo pipefail
-          WP_VERSION=$(jq -r '.wordpress' <<< '${{ steps.get.outputs.current_versions }}')
+          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
           curl -L -O "https://wordpress.org/wordpress-$WP_VERSION.zip"
           unzip -q "wordpress-$WP_VERSION.zip"
           rm -f "wordpress-$WP_VERSION.zip"
-
-          # Clean it
           cd wordpress
           rm -f license.txt readme.html xmlrpc.php
-          rm -rf wp-content/themes/twenty*
-          rm -rf wp-content/plugins/akismet
+          rm -rf wp-content/themes/twenty* wp-content/plugins/akismet
           rm -f wp-content/plugins/hello.php
           cd ..
           rm -rf cleaned && mv wordpress cleaned
 
-      # ---- Ensure release dirs exist; (re)base them only if WP changed ----
-      - name: Ensure Release Trees
-        run: |
-          set -euo pipefail
-          WP_VERSION=$(jq -r '.wordpress' <<< '${{ steps.get.outputs.current_versions }}')
-
+      # --- Prepare release folders ---
+      - run: |
+          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
           mkdir -p releases
-          # Clean/base
-          if [ "${{ steps.diff.outputs.update_clean }}" = "true" ] || [ ! -d "releases/wordpress-clean-$WP_VERSION" ]; then
-            rm -rf "releases/wordpress-clean-$WP_VERSION"
-            cp -r cleaned "releases/wordpress-clean-$WP_VERSION"
+          if [ "${{ steps.diff.outputs.wp }}" = "true" ]; then
+            rm -rf releases/wordpress-clean-$WP_VERSION
+            cp -r cleaned releases/wordpress-clean-$WP_VERSION
+            rm -rf releases/wordpress-bricks-$WP_VERSION
+            cp -r cleaned releases/wordpress-bricks-$WP_VERSION
+            rm -rf releases/wordpress-elementor-$WP_VERSION
+            cp -r cleaned releases/wordpress-elementor-$WP_VERSION
           fi
 
-          # Bricks base
-          if [ "${{ steps.diff.outputs.update_bricks }}" = "true" ] || [ ! -d "releases/wordpress-bricks-$WP_VERSION" ]; then
-            rm -rf "releases/wordpress-bricks-$WP_VERSION"
-            cp -r cleaned "releases/wordpress-bricks-$WP_VERSION"
-          fi
-
-          # Elementor base
-          if [ "${{ steps.diff.outputs.update_elementor }}" = "true" ] || [ ! -d "releases/wordpress-elementor-$WP_VERSION" ]; then
-            rm -rf "releases/wordpress-elementor-$WP_VERSION"
-            cp -r cleaned "releases/wordpress-elementor-$WP_VERSION"
-          fi
-
-      # ---- Selectively update ONLY folders inside Bricks release tree ----
-      - name: Update Bricks & Core Framework & Dixy (selective)
-        if: steps.diff.outputs.update_bricks == 'true' || steps.diff.outputs.changed_bricks == 'true' || steps.diff.outputs.changed_core == 'true' || steps.diff.outputs.changed_dixy == 'true'
+      # --- Update Bricks Package ---
+      - if: steps.diff.outputs.wp == 'true' || steps.diff.outputs.bricks == 'true' || steps.diff.outputs.core == 'true' || steps.diff.outputs.dixy == 'true'
         env:
           BRICKS_LICENSE_KEY: ${{ secrets.BRICKS_LICENSE_KEY }}
         run: |
-          set -euo pipefail
-          VERS='${{ steps.get.outputs.current_versions }}'
-          WP_VERSION=$(jq -r '.wordpress' <<< "$VERS")
-          PUSH_DIR="releases/wordpress-bricks-$WP_VERSION"
-          cd "$PUSH_DIR"
+          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
+          cd releases/wordpress-bricks-$WP_VERSION
 
-          # Dixy child (always refresh if flagged)
-          if [ "${{ steps.diff.outputs.changed_dixy }}" = "true" ] || [ "${{ steps.diff.outputs.update_bricks }}" = "true" ]; then
-            rm -rf wp-content/themes/dixy-child
-            curl -L -o /tmp/dixy.zip https://github.com/DinuraSellapperuma/dixy-child/archive/refs/heads/main.zip
-            unzip -o -q /tmp/dixy.zip
-            mv -f dixy-child-main wp-content/themes/dixy-child
-            rm -f /tmp/dixy.zip
+          # Dixy child
+          rm -rf wp-content/themes/dixy-child
+          curl -L -o /tmp/dixy.zip https://github.com/DinuraSellapperuma/dixy-child/archive/refs/heads/main.zip
+          unzip -o -q /tmp/dixy.zip
+          mv dixy-child-main wp-content/themes/dixy-child
+          rm -f /tmp/dixy.zip
+
+          # Bricks
+          if [ "$(jq -r '.bricks_available' /tmp/current.json)" = "true" ]; then
+            rm -rf wp-content/themes/bricks
+            BRICKS_URL="https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"
+            curl -L -o /tmp/bricks.zip "$BRICKS_URL" || curl -L -o /tmp/bricks.zip "$BRICKS_URL&version=2.0.1"
+            unzip -o -q /tmp/bricks.zip -d wp-content/themes/
+            rm -f /tmp/bricks.zip
           fi
 
-          # Bricks theme
-          if [ "${{ steps.get.outputs.current_versions }}" != "" ] && jq -e '.bricks_available' <<< "$VERS" >/dev/null; then
-            if [ "$(jq -r '.bricks_available' <<< "$VERS")" = "true" ] && [ "${{ steps.diff.outputs.changed_bricks }}" = "true" -o "${{ steps.diff.outputs.update_bricks }}" = "true" ]; then
-              rm -rf wp-content/themes/bricks
-              BRICKS_API_URL="https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"
-              if ! curl -f -L -o /tmp/bricks.zip "$BRICKS_API_URL"; then
-                curl -L -o /tmp/bricks.zip "$BRICKS_API_URL&version=2.0.1"
-              fi
-              unzip -o -q /tmp/bricks.zip -d wp-content/themes/
-              rm -f /tmp/bricks.zip
-            fi
+          # Core Framework
+          rm -rf wp-content/plugins/core-framework
+          CORE_VERSION=$(jq -r '.core_framework' /tmp/current.json)
+          if [ "$CORE_VERSION" = "latest" ]; then
+            curl -L -o /tmp/core.zip "https://downloads.wordpress.org/plugin/core-framework.zip"
+          else
+            curl -L -o /tmp/core.zip "https://downloads.wordpress.org/plugin/core-framework.$CORE_VERSION.zip"
           fi
+          unzip -o -q /tmp/core.zip -d wp-content/plugins/
+          rm -f /tmp/core.zip
 
-          # Core Framework plugin
-          if [ "${{ steps.diff.outputs.changed_core }}" = "true" -o "${{ steps.diff.outputs.update_bricks }}" = "true" ]; then
-            CORE_VERSION=$(jq -r '.core_framework' <<< "$VERS")
-            rm -rf wp-content/plugins/core-framework
-            if [ "$CORE_VERSION" = "latest" ]; then
-              curl -L -o /tmp/core.zip "https://downloads.wordpress.org/plugin/core-framework.zip"
-            else
-              curl -L -o /tmp/core.zip "https://downloads.wordpress.org/plugin/core-framework.$CORE_VERSION.zip"
-            fi
-            unzip -o -q /tmp/core.zip -d wp-content/plugins/
-            rm -f /tmp/core.zip
-          fi
-
-      # ---- Selectively update ONLY folders inside Elementor release tree ----
-      - name: Update Hello & Elementor (selective)
-        if: steps.diff.outputs.update_elementor == 'true' || steps.diff.outputs.changed_hello == 'true' || steps.diff.outputs.changed_elementor == 'true'
+      # --- Update Elementor Package ---
+      - if: steps.diff.outputs.wp == 'true' || steps.diff.outputs.hello == 'true' || steps.diff.outputs.elementor == 'true'
         run: |
-          set -euo pipefail
-          VERS='${{ steps.get.outputs.current_versions }}'
-          WP_VERSION=$(jq -r '.wordpress' <<< "$VERS")
-          PUSH_DIR="releases/wordpress-elementor-$WP_VERSION"
-          cd "$PUSH_DIR"
+          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
+          cd releases/wordpress-elementor-$WP_VERSION
 
-          # Hello theme
-          if [ "${{ steps.diff.outputs.changed_hello }}" = "true" -o "${{ steps.diff.outputs.update_elementor }}" = "true" ]; then
-            HELLO_VERSION=$(jq -r '.hello_elementor' <<< "$VERS")
-            rm -rf wp-content/themes/hello-elementor
-            if [ "$HELLO_VERSION" = "latest" ]; then
-              curl -L -o /tmp/hello.zip "https://downloads.wordpress.org/theme/hello-elementor.zip"
-            else
-              curl -L -o /tmp/hello.zip "https://downloads.wordpress.org/theme/hello-elementor.$HELLO_VERSION.zip"
-            fi
-            unzip -o -q /tmp/hello.zip -d wp-content/themes/
-            rm -f /tmp/hello.zip
+          # Hello
+          rm -rf wp-content/themes/hello-elementor
+          HELLO_VERSION=$(jq -r '.hello_elementor' /tmp/current.json)
+          if [ "$HELLO_VERSION" = "latest" ]; then
+            curl -L -o /tmp/hello.zip "https://downloads.wordpress.org/theme/hello-elementor.zip"
+          else
+            curl -L -o /tmp/hello.zip "https://downloads.wordpress.org/theme/hello-elementor.$HELLO_VERSION.zip"
           fi
+          unzip -o -q /tmp/hello.zip -d wp-content/themes/
+          rm -f /tmp/hello.zip
 
-          # Elementor plugin
-          if [ "${{ steps.diff.outputs.changed_elementor }}" = "true" -o "${{ steps.diff.outputs.update_elementor }}" = "true" ]; then
-            ELEMENTOR_VERSION=$(jq -r '.elementor' <<< "$VERS")
-            rm -rf wp-content/plugins/elementor
-            if [ "$ELEMENTOR_VERSION" = "latest" ]; then
-              curl -L -o /tmp/elementor.zip "https://downloads.wordpress.org/plugin/elementor.zip"
-            else
-              curl -L -o /tmp/elementor.zip "https://downloads.wordpress.org/plugin/elementor.$ELEMENTOR_VERSION.zip"
-            fi
-            unzip -o -q /tmp/elementor.zip -d wp-content/plugins/
-            rm -f /tmp/elementor.zip
+          # Elementor
+          rm -rf wp-content/plugins/elementor
+          ELEMENTOR_VERSION=$(jq -r '.elementor' /tmp/current.json)
+          if [ "$ELEMENTOR_VERSION" = "latest" ]; then
+            curl -L -o /tmp/elementor.zip "https://downloads.wordpress.org/plugin/elementor.zip"
+          else
+            curl -L -o /tmp/elementor.zip "https://downloads.wordpress.org/plugin/elementor.$ELEMENTOR_VERSION.zip"
           fi
+          unzip -o -q /tmp/elementor.zip -d wp-content/plugins/
+          rm -f /tmp/elementor.zip
 
-      # ---- Zip only what changed ----
-      - name: Rebuild ZIPs (selective)
-        run: |
-          set -euo pipefail
-          VERS='${{ steps.get.outputs.current_versions }}'
-          WP_VERSION=$(jq -r '.wordpress' <<< "$VERS")
+      # --- Zip Updated Packages ---
+      - run: |
+          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
           cd releases
-
-          # Clean zip only if base changed
-          if [ "${{ steps.diff.outputs.update_clean }}" = "true" ]; then
-            rm -f "wordpress-clean-$WP_VERSION.zip"
-            zip -r "wordpress-clean-$WP_VERSION.zip" "wordpress-clean-$WP_VERSION" >/dev/null
-          fi
-
-          # Bricks zip if bricks package changed
-          if [ "${{ steps.diff.outputs.update_bricks }}" = "true" ] || [ "${{ steps.diff.outputs.changed_bricks }}" = "true" ] || [ "${{ steps.diff.outputs.changed_core }}" = "true" ] || [ "${{ steps.diff.outputs.changed_dixy }}" = "true" ]; then
-            rm -f "wordpress-bricks-$WP_VERSION.zip"
-            zip -r "wordpress-bricks-$WP_VERSION.zip" "wordpress-bricks-$WP_VERSION" >/dev/null
-          fi
-
-          # Elementor zip if elementor package changed
-          if [ "${{ steps.diff.outputs.update_elementor }}" = "true" ] || [ "${{ steps.diff.outputs.changed_hello }}" = "true" ] || [ "${{ steps.diff.outputs.changed_elementor }}" = "true" ]; then
-            rm -f "wordpress-elementor-$WP_VERSION.zip"
-            zip -r "wordpress-elementor-$WP_VERSION.zip" "wordpress-elementor-$WP_VERSION" >/dev/null
-          fi
+          [ "${{ steps.diff.outputs.wp }}" = "true" ] && zip -r "wordpress-clean-$WP_VERSION.zip" "wordpress-clean-$WP_VERSION" >/dev/null
+          ([ "${{ steps.diff.outputs.wp }}" = "true" ] || [ "${{ steps.diff.outputs.bricks }}" = "true" ] || [ "${{ steps.diff.outputs.core }}" = "true" ] || [ "${{ steps.diff.outputs.dixy }}" = "true" ]) && zip -r "wordpress-bricks-$WP_VERSION.zip" "wordpress-bricks-$WP_VERSION" >/dev/null
+          ([ "${{ steps.diff.outputs.wp }}" = "true" ] || [ "${{ steps.diff.outputs.hello }}" = "true" ] || [ "${{ steps.diff.outputs.elementor }}" = "true" ]) && zip -r "wordpress-elementor-$WP_VERSION.zip" "wordpress-elementor-$WP_VERSION" >/dev/null
           cd ..
 
-      # ---- Persist new versions file & commit only changed paths ----
-      - name: Save versions.json
-        run: |
-          echo '${{ steps.get.outputs.current_versions }}' | jq . > versions.json
+      # --- Save versions.json and commit ---
+      - run: cp /tmp/current.json versions.json
 
-      - name: Commit & Push
-        env:
+      - env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add versions.json
-          # Only add release folders that changed (based on flags)
-          VERS='${{ steps.get.outputs.current_versions }}'
-          WP_VERSION=$(jq -r '.wordpress' <<< "$VERS")
-
-          if [ "${{ steps.diff.outputs.update_clean }}" = "true" ]; then
-            git add "releases/wordpress-clean-$WP_VERSION" "releases/wordpress-clean-$WP_VERSION.zip"
-          fi
-          if [ "${{ steps.diff.outputs.update_bricks }}" = "true" ] || [ "${{ steps.diff.outputs.changed_bricks }}" = "true" ] || [ "${{ steps.diff.outputs.changed_core }}" = "true" ] || [ "${{ steps.diff.outputs.changed_dixy }}" = "true" ]; then
-            git add "releases/wordpress-bricks-$WP_VERSION" "releases/wordpress-bricks-$WP_VERSION.zip"
-          fi
-          if [ "${{ steps.diff.outputs.update_elementor }}" = "true" ] || [ "${{ steps.diff.outputs.changed_hello }}" = "true" ] || [ "${{ steps.diff.outputs.changed_elementor }}" = "true" ]; then
-            git add "releases/wordpress-elementor-$WP_VERSION" "releases/wordpress-elementor-$WP_VERSION.zip"
-          fi
-
+          git add versions.json releases
           if git diff --staged --quiet; then
-            echo "Nothing changed."
-            exit 0
+            echo "No changes"
+          else
+            git commit -m "Update releases $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git push
           fi
-
-          git commit -m "Selective update: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          git push
