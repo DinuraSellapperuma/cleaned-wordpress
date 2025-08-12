@@ -1,127 +1,74 @@
-name: WordPress Selective Releases with Safe Bricks Key & Custom wp-config
+name: Clean WordPress Latest
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
-  build:
+  clean-wordpress:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: sudo apt-get update && sudo apt-get install -y jq zip unzip curl
-
-      # --- Step 1: Get All Versions (safe for secrets) ---
-      - id: get
-        env:
-          BRICKS_LICENSE_KEY: ${{ secrets.BRICKS_LICENSE_KEY }}
+      - name: Get Latest WordPress Version
+        id: get_version
         run: |
-          set -euo pipefail
-          echo "::add-mask::$BRICKS_LICENSE_KEY"
+          curl -s https://api.wordpress.org/core/version-check/1.7/ > version.json
+          LATEST=$(jq -r '.offers[0].current' version.json)
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+          echo "Latest WordPress version: $LATEST"
 
-          # WordPress core version
-          WP_VERSION=$(curl -s https://api.wordpress.org/core/version-check/1.7/ | jq -r '.offers[0].current')
-
-          # Bricks header-hash detection
-          BRICKS_AVAILABLE=false
-          BRICKS_HASH="unavailable"
-          if [ -n "${BRICKS_LICENSE_KEY:-}" ]; then
-            if BRICKS_HEADERS=$(curl -s -I "https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"); then
-              CONTENT_LENGTH=$(echo "$BRICKS_HEADERS" | grep -i content-length | awk '{print $2}' | tr -d '\r\n' || echo "unknown")
-              LAST_MODIFIED=$(echo "$BRICKS_HEADERS" | grep -i last-modified | cut -d' ' -f2- | tr -d '\r\n' || echo "unknown")
-              BRICKS_HASH=$(echo "${CONTENT_LENGTH}-${LAST_MODIFIED}" | sha256sum | awk '{print $1}')
-              BRICKS_AVAILABLE=true
-            fi
-          fi
-
-          # Core Framework plugin
-          CORE_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/core-framework.json" | jq -r '.version // "latest"')
-
-          # Hello Elementor theme
-          HELLO_VERSION=$(curl -s "https://api.wordpress.org/themes/info/1.0/hello-elementor.json" | jq -r '.version // "latest"')
-
-          # Elementor plugin
-          ELEMENTOR_VERSION=$(curl -s "https://api.wordpress.org/plugins/info/1.0/elementor.json" | jq -r '.version // "latest"')
-
-          # Dixy Child theme
-          if DIXY_API=$(curl -s "https://api.github.com/repos/DinuraSellapperuma/dixy-child/commits/main") && echo "$DIXY_API" | jq . >/dev/null 2>&1; then
-            DIXY_VERSION=$(echo "$DIXY_API" | jq -r '.sha' | cut -c1-8)
+      - name: Check for Existing Version
+        id: check_existing
+        run: |
+          if [ -f "VERSION.txt" ] && grep -q "${{ steps.get_version.outputs.version }}" VERSION.txt; then
+            echo "Latest version already processed."
+            echo "skip=true" >> $GITHUB_OUTPUT
           else
-            DIXY_VERSION=$(date +%Y%m%d)
+            echo "New version found, proceeding with download and cleanup."
+            echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-          # Build safe JSON
-          jq -n \
-            --arg wp "$WP_VERSION" \
-            --arg bricks "$BRICKS_HASH" \
-            --argjson bricks_available $([ "$BRICKS_AVAILABLE" = true ] && echo true || echo false) \
-            --arg core "$CORE_VERSION" \
-            --arg hello "$HELLO_VERSION" \
-            --arg elementor "$ELEMENTOR_VERSION" \
-            --arg dixy "$DIXY_VERSION" \
-            '{wordpress:$wp, bricks:$bricks, bricks_available:$bricks_available, core_framework:$core, hello_elementor:$hello, elementor:$elementor, dixy_child:$dixy}' \
-            > /tmp/current.json
-
-          {
-            echo 'versions<<JSON'
-            cat /tmp/current.json
-            echo 'JSON'
-          } >> "$GITHUB_OUTPUT"
-
-      # --- Step 2: Compare to Previous Versions ---
-      - id: diff
+      - name: Download WordPress
+        if: steps.check_existing.outputs.skip == 'false'
         run: |
-          set -euo pipefail
-          echo '{}' > /tmp/prev.json
-          [ -f versions.json ] && cp versions.json /tmp/prev.json
+          echo "Downloading WordPress ${{ steps.get_version.outputs.version }}"
+          curl -L -O https://wordpress.org/wordpress-${{ steps.get_version.outputs.version }}.zip
+          unzip -q wordpress-${{ steps.get_version.outputs.version }}.zip
 
-          changed() { jq -r "(.${1} != (input|.${1}))" /tmp/current.json /tmp/prev.json; }
-
-          echo "wp=$(changed wordpress)" >> $GITHUB_OUTPUT
-          echo "bricks=$(changed bricks)" >> $GITHUB_OUTPUT
-          echo "core=$(changed core_framework)" >> $GITHUB_OUTPUT
-          echo "hello=$(changed hello_elementor)" >> $GITHUB_OUTPUT
-          echo "elementor=$(changed elementor)" >> $GITHUB_OUTPUT
-          echo "dixy=$(changed dixy_child)" >> $GITHUB_OUTPUT
-
-      # --- Step 3: Download and Clean WordPress ---
-      - if: steps.diff.outputs.wp == 'true'
+      - name: Clean WordPress
+        if: steps.check_existing.outputs.skip == 'false'
         run: |
-          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
-          curl -L -O "https://wordpress.org/wordpress-$WP_VERSION.zip"
-          unzip -q "wordpress-$WP_VERSION.zip"
-          rm -f "wordpress-$WP_VERSION.zip"
           cd wordpress
+          echo "Removing unnecessary files..."
           rm -f license.txt readme.html xmlrpc.php
-          rm -rf wp-content/themes/twenty* wp-content/plugins/akismet
+          rm -rf wp-content/themes/twenty*
+          rm -rf wp-content/plugins/akismet
           rm -f wp-content/plugins/hello.php
           cd ..
-          rm -rf cleaned && mv wordpress cleaned
+          rm -rf cleaned
+          mv wordpress cleaned
 
-      # --- Step 4: Modify wp-config-sample.php ---
-      - if: steps.diff.outputs.wp == 'true'
+      - name: Modify wp-config-sample.php
+        if: steps.check_existing.outputs.skip == 'false'
         run: |
           echo "Adding custom configuration to wp-config-sample.php"
+          # Create a simple replacement using awk
           awk '
           /\/\* Add any custom values between this line and the "stop editing" line\. \*\// {
             print "// Custom configuration added automatically"
             print "define('\''AUTOMATIC_UPDATER_DISABLED'\'', true);"
             print "define('\''WP_AUTO_UPDATE_CORE'\'', false);"
-            print "// Disable WP Cron"
+            print "// Cron Disable"
             print "define('\''DISABLE_WP_CRON'\'', true);"
             print "// Limit the number of post revisions to 0"
             print "define('\''WP_POST_REVISIONS'\'', false);"
-            print "// Increase PHP memory limit"
-            print "define('\''WP_MEMORY_LIMIT'\'', '256M');"
-            print "// Debug mode off by default"
-            print "define('\''WP_DEBUG'\'', false);"
             print ""
             print $0
             next
@@ -130,106 +77,38 @@ jobs:
           ' cleaned/wp-config-sample.php > temp_config.php
           mv temp_config.php cleaned/wp-config-sample.php
 
-      # --- Step 5: Prepare Release Directories ---
-      - run: |
-          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
-          mkdir -p releases
-          if [ "${{ steps.diff.outputs.wp }}" = "true" ]; then
-            rm -rf releases/wordpress-clean-$WP_VERSION
-            cp -r cleaned releases/wordpress-clean-$WP_VERSION
-            rm -rf releases/wordpress-bricks-$WP_VERSION
-            cp -r cleaned releases/wordpress-bricks-$WP_VERSION
-            rm -rf releases/wordpress-elementor-$WP_VERSION
-            cp -r cleaned releases/wordpress-elementor-$WP_VERSION
-          fi
-
-      # --- Step 6: Update Bricks Package ---
-      - if: steps.diff.outputs.wp == 'true' || steps.diff.outputs.bricks == 'true' || steps.diff.outputs.core == 'true' || steps.diff.outputs.dixy == 'true'
-        env:
-          BRICKS_LICENSE_KEY: ${{ secrets.BRICKS_LICENSE_KEY }}
+      - name: Save Cleaned Version Number
+        if: steps.check_existing.outputs.skip == 'false'
         run: |
-          set -euo pipefail
-          echo "::add-mask::$BRICKS_LICENSE_KEY"
+          echo "${{ steps.get_version.outputs.version }}" > VERSION.txt
 
-          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
-          cd releases/wordpress-bricks-$WP_VERSION
-
-          # Dixy Child
-          rm -rf wp-content/themes/dixy-child
-          curl -L -o /tmp/dixy.zip https://github.com/DinuraSellapperuma/dixy-child/archive/refs/heads/main.zip
-          unzip -o -q /tmp/dixy.zip
-          mv dixy-child-main wp-content/themes/dixy-child
-          rm -f /tmp/dixy.zip
-
-          # Bricks
-          if [ "$(jq -r '.bricks_available' /tmp/current.json)" = "true" ]; then
-            rm -rf wp-content/themes/bricks
-            BRICKS_URL="https://my.bricksbuilder.io/api/commerce/download/get_theme?license_key=$BRICKS_LICENSE_KEY"
-            curl -f -L -o /tmp/bricks.zip "$BRICKS_URL" || curl -f -L -o /tmp/bricks.zip "$BRICKS_URL&version=2.0.1"
-            unzip -o -q /tmp/bricks.zip -d wp-content/themes/
-            rm -f /tmp/bricks.zip
-          fi
-
-          # Core Framework
-          rm -rf wp-content/plugins/core-framework
-          CORE_VERSION=$(jq -r '.core_framework' /tmp/current.json)
-          if [ "$CORE_VERSION" = "latest" ]; then
-            curl -L -o /tmp/core.zip "https://downloads.wordpress.org/plugin/core-framework.zip"
-          else
-            curl -L -o /tmp/core.zip "https://downloads.wordpress.org/plugin/core-framework.$CORE_VERSION.zip"
-          fi
-          unzip -o -q /tmp/core.zip -d wp-content/plugins/
-          rm -f /tmp/core.zip
-
-      # --- Step 7: Update Elementor Package ---
-      - if: steps.diff.outputs.wp == 'true' || steps.diff.outputs.hello == 'true' || steps.diff.outputs.elementor == 'true'
+      - name: Create Versioned Folder and Zip
+        if: steps.check_existing.outputs.skip == 'false'
         run: |
-          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
-          cd releases/wordpress-elementor-$WP_VERSION
-
-          # Hello Elementor
-          rm -rf wp-content/themes/hello-elementor
-          HELLO_VERSION=$(jq -r '.hello_elementor' /tmp/current.json)
-          if [ "$HELLO_VERSION" = "latest" ]; then
-            curl -L -o /tmp/hello.zip "https://downloads.wordpress.org/theme/hello-elementor.zip"
-          else
-            curl -L -o /tmp/hello.zip "https://downloads.wordpress.org/theme/hello-elementor.$HELLO_VERSION.zip"
-          fi
-          unzip -o -q /tmp/hello.zip -d wp-content/themes/
-          rm -f /tmp/hello.zip
-
-          # Elementor
-          rm -rf wp-content/plugins/elementor
-          ELEMENTOR_VERSION=$(jq -r '.elementor' /tmp/current.json)
-          if [ "$ELEMENTOR_VERSION" = "latest" ]; then
-            curl -L -o /tmp/elementor.zip "https://downloads.wordpress.org/plugin/elementor.zip"
-          else
-            curl -L -o /tmp/elementor.zip "https://downloads.wordpress.org/plugin/elementor.$ELEMENTOR_VERSION.zip"
-          fi
-          unzip -o -q /tmp/elementor.zip -d wp-content/plugins/
-          rm -f /tmp/elementor.zip
-
-      # --- Step 8: Create Zip Files ---
-      - run: |
-          WP_VERSION=$(jq -r '.wordpress' /tmp/current.json)
+          # Create version folder
+          mkdir -p "releases/wordpress-${{ steps.get_version.outputs.version }}"
+          
+          # Copy cleaned WordPress to version folder
+          cp -r cleaned/* "releases/wordpress-${{ steps.get_version.outputs.version }}/"
+          
+          # Create zip file
           cd releases
-          [ "${{ steps.diff.outputs.wp }}" = "true" ] && zip -r "wordpress-clean-$WP_VERSION.zip" "wordpress-clean-$WP_VERSION" >/dev/null
-          ([ "${{ steps.diff.outputs.wp }}" = "true" ] || [ "${{ steps.diff.outputs.bricks }}" = "true" ] || [ "${{ steps.diff.outputs.core }}" = "true" ] || [ "${{ steps.diff.outputs.dixy }}" = "true" ]) && zip -r "wordpress-bricks-$WP_VERSION.zip" "wordpress-bricks-$WP_VERSION" >/dev/null
-          ([ "${{ steps.diff.outputs.wp }}" = "true" ] || [ "${{ steps.diff.outputs.hello }}" = "true" ] || [ "${{ steps.diff.outputs.elementor }}" = "true" ]) && zip -r "wordpress-elementor-$WP_VERSION.zip" "wordpress-elementor-$WP_VERSION" >/dev/null
+          zip -r "wordpress-clean-${{ steps.get_version.outputs.version }}.zip" "wordpress-${{ steps.get_version.outputs.version }}/"
           cd ..
+          
+          echo "Created clean WordPress zip: releases/wordpress-clean-${{ steps.get_version.outputs.version }}.zip"
 
-      # --- Step 9: Save versions.json & Commit ---
-      - run: cp /tmp/current.json versions.json
-
-      - env:
+      - name: Commit and Push Changes
+        if: steps.check_existing.outputs.skip == 'false'
+        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add versions.json releases
+          git add -A
           if git diff --staged --quiet; then
-            echo "No changes"
+            echo "No changes to commit"
           else
-            git commit -m "Update releases $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git commit -m "Clean WordPress ${{ steps.get_version.outputs.version }}"
             git push
           fi
